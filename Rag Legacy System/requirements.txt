@@ -1,0 +1,12 @@
+langchain
+langchain-aws
+langchain-chroma
+langchain-classic
+boto3
+botocore
+chromadb
+pypdf
+docx2txt
+psutil
+pillow
+pdf2image
