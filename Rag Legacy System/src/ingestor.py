@@ -1,154 +1,146 @@
-#Load all PDFs/DOCX/TXT from the documents folder
-#Split them into overlapping chunks and embed them with Titan, storing everything in FAISS.”
-
+# Multimodal ingestion (PDF, TXT, DOCX, images + OCR)
 import os
-import logging
-from pathlib import Path
-
-import boto3
-from botocore.config import Config
-
-from langchain_community.document_loaders import Docx2txtLoader, TextLoader, PyPDFLoader
+import numpy as np
+import easyocr
+from docx import Document as DocxDocument
+from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_aws.embeddings import BedrockEmbeddings
-from langchain_community.vectorstores import FAISS
 
-from .config import (
-    DOCUMENT_PATH,
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-    REGION_NAME,
-    TITAN_EMBEDDING_MODEL,
-    CONNECT_TIMEOUT,
-    READ_TIMEOUT,
-)
-
-logger = logging.getLogger(__name__)
-
-INDEX_PATH = "faiss_index"
-
-# Compute project root and default docs dir from this file's location
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DOC_DIR = BASE_DIR / "documents"
+from .bedrock_embedder import TitanEmbedder
+from src.config import REGION_NAME, BEDROCK_EMBED_MODEL, CHUNK_SIZE, CHUNK_OVERLAP
+from langchain_community.vectorstores.faiss import FAISS
+from langchain_core.documents import Document
+from langchain_community.docstore.in_memory import InMemoryDocstore
 
 
-def load_and_split_documents():
-    """
-    Loads all PDF, DOCX, and TXT files from a documents folder and splits into chunks.
-    It first tries DOCUMENT_PATH from config/.env, then falls back to ./documents
-    relative to the project root.
-    """
-    candidate_paths = []
-
-    # 1) Path from config / .env
-    if DOCUMENT_PATH:
-        candidate_paths.append(Path(DOCUMENT_PATH))
-
-    # 2) Default path: <project_root>/documents
-    candidate_paths.append(DEFAULT_DOC_DIR)
-
-    docs = []
-    chosen_path = None
-
-    for p in candidate_paths:
-        logger.info(f"Trying documents path: {p}")
-        if p.exists() and any(p.glob("**/*")):
-            chosen_path = p
-            break
-
-    if chosen_path is None:
-        logger.warning(
-            f"No documents found in any of these paths: "
-            f"{', '.join(str(p) for p in candidate_paths)}"
-        )
-        print(
-            f"No documents found. Make sure your PDFs/TXTs are in "
-            f"{DEFAULT_DOC_DIR} or set DOCUMENT_PATH correctly in .env."
-        )
-        return None
-
-    logger.info(f"Using documents path: {chosen_path}")
-
-    # Actually load docs
-    for file_path in chosen_path.glob("**/*"):
-        if not file_path.is_file():
-            continue
-
-        file_ext = file_path.suffix.lower()
-        file_path_str = str(file_path)
-
-        try:
-            if file_ext == ".pdf":
-                loader = PyPDFLoader(file_path_str)
-                docs.extend(loader.load())
-                logger.info(f"Loaded PDF: {file_path.name}")
-
-            elif file_ext in [".docx", ".doc"]:
-                loader = Docx2txtLoader(file_path_str)
-                docs.extend(loader.load())
-                logger.info(f"Loaded Word document: {file_path.name}")
-
-            elif file_ext == ".txt":
-                loader = TextLoader(file_path_str, encoding="utf-8")
-                docs.extend(loader.load())
-                logger.info(f"Loaded text file: {file_path.name}")
-
-            else:
-                logger.info(f"Skipping unsupported file: {file_path.name}")
-
-        except Exception as e:
-            logger.error(f"Failed to read file {file_path.name}: {e}")
-            continue
-
-    if not docs:
-        logger.warning(f"Documents path exists but no readable files found in {chosen_path}")
-        print(f"Documents path exists but no readable files found in {chosen_path}")
-        return None
-
+def chunk_text_with_metadata(text, source_name):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
-        length_function=len,
-        separators=["\n\n", "\n", " ", ""],
     )
 
-    chunks = splitter.split_documents(docs)
-    logger.info(f"📌 Finished splitting → {len(docs)} documents into {len(chunks)} chunks")
+    raw_chunks = splitter.split_text(text)
+
+    chunks = []
+    for i, chunk in enumerate(raw_chunks):
+        chunks.append({
+            "content": chunk,
+            "source": source_name,
+            "page": i
+        })
+
     return chunks
 
 
-def create_and_store_embeddings(chunks):
-    """
-    Creates embeddings using Titan and saves FAISS index to disk.
-    """
-    logger.info("Creating embeddings and storing in FAISS vector store...")
+def load_documents():
+    from src.config import DOCUMENT_PATH
+    reader_ocr = easyocr.Reader(['en'])
 
-    try:
-        config = Config(
-            connect_timeout=CONNECT_TIMEOUT,
-            read_timeout=READ_TIMEOUT,
-            retries={"max_attempts": 3},
+    print(f"Loading documents from: {DOCUMENT_PATH}")
+
+    if not os.path.exists(DOCUMENT_PATH):
+        raise FileNotFoundError(f"Document path does not exist: {DOCUMENT_PATH}")
+
+    all_files = [
+        f for f in os.listdir(DOCUMENT_PATH)
+        if f.lower().endswith((".pdf", ".txt", ".docx", ".png", ".jpg", ".jpeg"))
+    ]
+
+    if not all_files:
+        raise ValueError(f"No supported files found in {DOCUMENT_PATH}")
+
+    all_chunks = []
+
+    for filename in all_files:
+        file_path = os.path.join(DOCUMENT_PATH, filename)
+        print(f"\n  Loading: {filename}")
+
+        if filename.lower().endswith(".pdf"):
+            reader = PdfReader(file_path)
+
+            for page_num, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if not page_text:
+                    continue
+
+                page_chunks = chunk_text_with_metadata(page_text, filename)
+                for c in page_chunks:
+                    c["page"] = page_num
+
+                all_chunks.extend(page_chunks)
+
+            print(f"   Loaded {len(reader.pages)} pages.")
+
+        elif filename.lower().endswith(".txt"):
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+
+            txt_chunks = chunk_text_with_metadata(text, filename)
+            for c in txt_chunks:
+                c["page"] = 0
+
+            all_chunks.extend(txt_chunks)
+            print(f"   Loaded TXT with {len(txt_chunks)} chunks.")
+
+        elif filename.lower().endswith(".docx"):
+            doc = DocxDocument(file_path)
+            full_text = "\n".join([p.text for p in doc.paragraphs])
+
+            docx_chunks = chunk_text_with_metadata(full_text, filename)
+            for c in docx_chunks:
+                c["page"] = 0
+
+            all_chunks.extend(docx_chunks)
+            print(f"   Loaded DOCX with {len(docx_chunks)} chunks.")
+
+        elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            ocr_text = reader_ocr.readtext(file_path, detail=0)
+            extracted_text = "\n".join(ocr_text)
+
+            img_chunks = chunk_text_with_metadata(extracted_text, filename)
+            for c in img_chunks:
+                c["page"] = 0
+
+            all_chunks.extend(img_chunks)
+            print(f"   Loaded image (OCR) with {len(img_chunks)} chunks.")
+
+    if not all_chunks:
+        raise ValueError("No extractable text found.")
+
+    print(f"\nSuccessfully created {len(all_chunks)} chunks.")
+    return all_chunks
+
+
+def build_faiss_vectorstore(chunks):
+    from langchain_core.documents import Document
+    
+    embedder = TitanEmbedder(BEDROCK_EMBED_MODEL, REGION_NAME)
+    
+    documents = [
+        Document(
+            page_content=c["content"],
+            metadata={"source": c["source"], "page": c["page"]}
         )
+        for c in chunks
+    ]
+    
+    print("Building vectorstore with embeddings...")
+    
+    vectorstore = FAISS.from_documents(
+        documents=documents,
+        embedding=embedder
+    )
+    
+    return vectorstore
 
-        bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=REGION_NAME,
-            config=config,
-        )
+def ingest_document(_unused):
+    print("\n===== STARTING INGESTION PIPELINE =====")
 
-        embedder = BedrockEmbeddings(
-            client=bedrock_client,
-            model_id=TITAN_EMBEDDING_MODEL,
-        )
+    chunks = load_documents()
 
-        # Build FAISS index from chunks
-        vectorstore = FAISS.from_documents(chunks, embedder)
-        vectorstore.save_local(INDEX_PATH)
+    vectorstore = build_faiss_vectorstore(chunks)
 
-        logger.info(f"✔ FAISS index saved successfully → {INDEX_PATH}")
-        logger.info(f"✔ Embedded chunks stored: {len(chunks)}")
-        return vectorstore
+    print("Saving FAISS index...")
+    vectorstore.save_local("faiss_index")
 
-    except Exception as e:
-        logger.error(f"🔥 ERROR: Failed to store FAISS index: {e}", exc_info=True)
-        return None
+    print("===== INGESTION COMPLETED SUCCESSFULLY =====")
