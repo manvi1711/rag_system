@@ -1,80 +1,66 @@
-RAG System with Amazon Bedrock + FAISS
-Phase-1: Text-based RAG
+Hybrid Multimodal RAG System (Text + OCR Images)
 
-This project implements a production-ready Retrieval-Augmented Generation (RAG) pipeline that enables users to ask natural-language questions over internal documents (PDF/DOCX/TXT) and receive:
-i)Accurate answers grounded in source documents
-ii)Traceable citations with page-level context
-iii) Performance metrics (response time, token usage, latency)
-The system uses Amazon Bedrock for both embeddings and text generation, and FAISS as the vector database for extremely fast similarity search.
+A modular Retrieval-Augmented Generation system that supports PDF, DOCX, TXT, and Images (with OCR).
+Built using FAISS, BM25, Amazon Bedrock Titan embeddings, and Claude reranking.
 
-Key Features:
-Embeddings= Amazon Titan titan-embed-text-v1
-LLM Generation=	Amazon Titan titan-text-lite (or similar)
-Vector Store= 	FAISS (local index)
-Document Types=	PDF, DOCX, TXT
-Chunking=	RecursiveCharacter Text Splitter
-CLI Interface=	Python argparse
-Tracing=	Sources + Snippets + Metrics
+ Features
 
-How It Works:
-        ┌─────────────┐
-        │  Documents  │   (PDF/DOCX/TXT)
-        └──────┬──────┘
-               │  Ingest
-               ▼
- ┌─────────────────────────────────┐
- │ Split into chunks (overlap)     │
- │ Embed chunks using Titan        │
- │ Build FAISS vector index        │
- │ Save index locally              │
- └─────────────────────────────────┘
-               │
-               │ Query
-               ▼
- ┌─────────────────────────────────┐
- │ Embed question using Titan      │
- │ Retrieve top-K chunks via FAISS │
- │ Add context to LLM prompt       │
- │ Generate final answer           │
- │ Show citations + metrics        │
- └─────────────────────────────────┘
+Multimodal ingestion= PDF, DOCX, TXT, PNG/JPG
 
-Setup:
-1️) Install dependencies:
+OCR support= EasyOCR extracts text from images
+
+Hybrid Retrieval= FAISS (semantic) + metadata
+
+Claude Reranking= Improves relevance
+
+Chunking with metadata (file name, page number, chunk index)
+
+Local vectorstore persistence
+
+Project Structure
+rag_system/
+│
+├── documents/         # Add your files here
+├── vectorstore/       
+│
+├── src/
+│   ├── ingestor.py        # Reads + processes files
+│   ├── retriever.py       # Hybrid retrieval + reranking
+│   ├── bedrock_embedder.py
+│   ├── utilities.py
+│   ├── config.py
+│   └── __init__.py
+│
+└── main.py             # CLI: ingest / query
+
+ Setup
+1. Install dependencies
 pip install -r requirements.txt
 
-2️) Configure AWS:
-~/.aws/credentials
-
-3️) Configure environment variables:
-Create .env at the project root:
+2. Add AWS credentials to .env
+AWS_ACCESS_KEY_ID=xxxx
+AWS_SECRET_ACCESS_KEY=xxxx
 AWS_REGION=us-east-1
-EMBEDDING_MODEL=amazon.titan-embed-text-v1
-TEXT_MODEL=amazon.titan-text-lite
-DOCUMENT_PATH=documents
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=200
 
-Step 1 — Ingest Documents
-Place PDFs/DOCX/TXT inside the documents/ folder and run:
+ Usage
+1. Ingest documents
+
+Add files to the documents/ folder, then run:
+
 python main.py ingest
 
-Step 2 — Query the RAG System
-Example query:
-python main.py query "What revenue NVIDIA announced for its fourth quarter and fiscal year?"
+2. Ask questions
+python main.py query "Your question here"
 
-Design Choices & Rationale:
-1) Amazon Titan embeddings: 	High-quality multilingual embeddings optimized for enterprise RAG
-2) Amazon Titan text generation:	Reproducible grounded answers with low hallucination risk
-3) FAISS instead of Chroma: 	Higher reliability on Windows + local runtime performance
-4) Local FAISS index: 	No external dependencies & faster debugging
-5) Chunking with overlap: 	Preserves context and minimizes fragmentation
-6) CLI interface: Quick prototyping and easy automation
+Example Output
+Found 30 candidate documents
+Reranking with Claude...
+Selected 5 diverse documents
 
-    
+--- Answer ---
+<final answer>
 
-
-
-
-
+--- Sources ---
+file.pdf - page 2
+image.png (OCR)
 
